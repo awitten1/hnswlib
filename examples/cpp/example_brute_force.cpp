@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <iostream>
 #include <iomanip>
@@ -13,17 +14,28 @@
 #include <random>
 #include <ratio>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
-std::vector<float> get_random_vector(int dim, unsigned seed = 42) {
-  static thread_local std::mt19937 rng(seed);
+std::vector<float> get_random_vector(int dim) {
+  static thread_local std::mt19937 rng(std::hash<std::thread::id>{}(std::this_thread::get_id()));
   std::uniform_real_distribution<> distrib_real;
   std::vector<float> data(dim);
   for (int i = 0; i < dim; i++) {
       data[i] = distrib_real(rng);
   }
   return data;
+}
+
+std::vector<float> get_random_perturbed_vector(const std::vector<float>& vec, float eps = 0.01) {
+  std::vector<float> ret(vec);
+  static thread_local std::mt19937 rng(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+  std::uniform_real_distribution<> distrib_real(-eps, eps);
+  for (int i = 0; i < ret.size(); i++) {
+    ret[i] += distrib_real(rng);
+  }
+  return ret;
 }
 
 struct Parameters {
@@ -40,43 +52,60 @@ Parameters parse_args(int argc, char** argv, int max_elements);
 class IndexBuilder {
   Parameters params_;
   hnswlib::AlgorithmInterface<float>* index_;
+  hnswlib::labeltype label_offset_;
   std::vector<std::thread> threads_;
   std::atomic<int> id_generator_{0};
+  bool time_ = true;
+  std::chrono::system_clock::time_point t1_;
+  std::chrono::system_clock::time_point t2_;
+  bool joined_ = false;
 
 public:
-  IndexBuilder(const Parameters& params, hnswlib::AlgorithmInterface<float>* index) :
-    params_(params), index_(index) {
+  IndexBuilder(const Parameters& params, hnswlib::AlgorithmInterface<float>* index,
+               hnswlib::labeltype label_offset = 0) :
+    params_(params), index_(index), label_offset_(label_offset) {
   }
 
-  void start() {
+  template<typename Callable>
+  void start(Callable c) {
+    t1_ = std::chrono::system_clock::now();
     for (int i = 0; i < params_.threads_for_index_building; ++i) {
-      threads_.emplace_back([this, i]() {
+      threads_.emplace_back([this, i, c]() {
         for (;;) {
           int id = id_generator_++;
           if (id >= params_.num_elements) break;
-          auto data = get_random_vector(params_.dim, 42 + i);
-          index_->addPoint(data.data(), id);
+          auto data = c(params_.dim);
+          index_->addPoint(data.data(), label_offset_ + id);
         }
       });
     }
   }
 
-  ~IndexBuilder() {
-    for (auto& thread : threads_)
+  void join() {
+    joined_ = true;
+    for (auto& thread : threads_) {
       thread.join();
+    }
+    t2_ = std::chrono::system_clock::now();
+  }
+
+  std::chrono::duration<float> get_build_duration() {
+    return t2_ - t1_;
   }
 
 };
 
 int main(int argc, char** argv) {
-  int max_elements = 1e7;
-  const Parameters params = parse_args(argc, argv, max_elements);
+  const int max_parameter_value = 10000000;
+  const Parameters params = parse_args(argc, argv, max_parameter_value);
   if (params.num_elements == 0) {
     fprintf(stderr, "--num_elements is required\n");
     exit(EXIT_FAILURE);
   }
-  if (params.search && params.num_elements < params.k) {
-    fprintf(stderr, "--num_elements must be at least --k when searching\n");
+  // Both batches remain in the index: N uniform vectors and N clustered vectors.
+  const size_t max_elements = 2 * static_cast<size_t>(params.num_elements);
+  if (params.search && max_elements < static_cast<size_t>(params.k)) {
+    fprintf(stderr, "2 * --num_elements must be at least --k when searching\n");
     exit(EXIT_FAILURE);
   }
   hnswlib::L2Space l2_space(params.dim);
@@ -88,13 +117,22 @@ int main(int argc, char** argv) {
     index = new hnswlib::HierarchicalNSW<float>(&l2_space, max_elements);
   }
 
-  auto t1 = std::chrono::system_clock::now();
   {
     IndexBuilder builder(params, index);
-    builder.start();
+    builder.start(get_random_vector);
+    builder.join();
+    std::cout << "index build took " << builder.get_build_duration().count() << " seconds\n";
   }
-  std::chrono::duration<float> index_build_duration = std::chrono::system_clock::now() - t1;
-  std::cout << "index build took " << index_build_duration.count() << " seconds\n";
+
+  {
+    auto vec = get_random_vector(params.dim);
+    IndexBuilder builder(params, index, params.num_elements);
+    builder.start([vec](int) {
+      return get_random_perturbed_vector(vec, 0.000001); });
+    builder.join();
+    std::cout << "perturbed index build took " << builder.get_build_duration().count() << " seconds\n";
+  }
+
   if (params.search) {
     int trials = 1000;
     float* trial_durations_ms = new float[trials];
