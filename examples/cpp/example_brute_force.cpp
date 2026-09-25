@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -16,6 +17,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 std::vector<float> get_random_vector(int dim) {
@@ -36,6 +38,20 @@ std::vector<float> get_random_perturbed_vector(const std::vector<float>& vec, fl
     ret[i] += distrib_real(rng);
   }
   return ret;
+}
+
+std::vector<float> get_random_unit_vector(int dim) {
+  static thread_local std::mt19937 rng(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+  std::normal_distribution<float> distribution(0.0f, 1.0f);
+  std::vector<float> data(dim);
+  double squared_norm = 0.0;
+  for (int i = 0; i < dim; ++i) {
+      data[i] = distribution(rng);
+      squared_norm += static_cast<double>(data[i]) * data[i];
+  }
+  const float norm = static_cast<float>(std::sqrt(squared_norm));
+  for (float& value : data) value /= norm;
+  return data;
 }
 
 struct Parameters {
@@ -60,17 +76,11 @@ class IndexBuilder {
   std::chrono::system_clock::time_point t2_;
   bool joined_ = false;
 
-public:
-  IndexBuilder(const Parameters& params, hnswlib::AlgorithmInterface<float>* index,
-               hnswlib::labeltype label_offset = 0) :
-    params_(params), index_(index), label_offset_(label_offset) {
-  }
-
   template<typename Callable>
-  void start(Callable c) {
+  void start_impl(Callable c) {
     t1_ = std::chrono::system_clock::now();
     for (int i = 0; i < params_.threads_for_index_building; ++i) {
-      threads_.emplace_back([this, i, c]() {
+      threads_.emplace_back([this, c]() {
         for (;;) {
           int id = id_generator_++;
           if (id >= params_.num_elements) break;
@@ -79,6 +89,17 @@ public:
         }
       });
     }
+  }
+
+public:
+  IndexBuilder(const Parameters& params, hnswlib::AlgorithmInterface<float>* index,
+               hnswlib::labeltype label_offset = 0) :
+    params_(params), index_(index), label_offset_(label_offset) {
+  }
+
+  template<typename Callable>
+  void start(Callable c) {
+    start_impl(c);
   }
 
   void join() {
@@ -96,16 +117,20 @@ public:
 };
 
 int main(int argc, char** argv) {
-  const int max_parameter_value = 10000000;
+  const int max_parameter_value = 100000000;
   const Parameters params = parse_args(argc, argv, max_parameter_value);
   if (params.num_elements == 0) {
     fprintf(stderr, "--num_elements is required\n");
     exit(EXIT_FAILURE);
   }
-  // Both batches remain in the index: N uniform vectors and N clustered vectors.
-  const size_t max_elements = 2 * static_cast<size_t>(params.num_elements);
+  // Three batches remain, plus the center used by the third batch.
+  const size_t max_elements = 3 * static_cast<size_t>(params.num_elements) + 1;
+  if (max_elements > static_cast<size_t>(max_parameter_value)) {
+    fprintf(stderr, "--num_elements is too large for three batches and their hub\n");
+    exit(EXIT_FAILURE);
+  }
   if (params.search && max_elements < static_cast<size_t>(params.k)) {
-    fprintf(stderr, "2 * --num_elements must be at least --k when searching\n");
+    fprintf(stderr, "3 * --num_elements + 1 must be at least --k when searching\n");
     exit(EXIT_FAILURE);
   }
   hnswlib::L2Space l2_space(params.dim);
@@ -117,20 +142,75 @@ int main(int argc, char** argv) {
     index = new hnswlib::HierarchicalNSW<float>(&l2_space, max_elements);
   }
 
-  {
-    IndexBuilder builder(params, index);
-    builder.start(get_random_vector);
-    builder.join();
-    std::cout << "index build took " << builder.get_build_duration().count() << " seconds\n";
-  }
+  // {
+  //   std::vector<std::vector<float>> vectors(params.num_elements);
+  //   std::generate(vectors.begin(), vectors.end(), [&params]() {
+  //     return get_random_vector(params.dim);
+  //   });
+  //   std::atomic<int> i{0};
+  //   IndexBuilder builder(params, index);
+  //   builder.start([&vectors, &i](int) {
+  //     return std::move(vectors[i++]); });
+  //   builder.join();
+  //   std::cout << "index build took " << builder.get_build_duration().count() << " seconds\n";
+  // }
+
+  // {
+  //   auto vec = get_random_vector(params.dim);
+  //   std::vector<std::vector<float>> vectors(params.num_elements);
+  //   std::generate(vectors.begin(), vectors.end(), [&vec]() {
+  //     return get_random_perturbed_vector(vec, 0.000001);
+  //   });
+  //   std::atomic<int> i{0};
+  //   IndexBuilder builder(params, index, params.num_elements);
+  //   builder.start([&vectors, &i](int) {
+  //     return std::move(vectors[i++]); });
+  //   builder.join();
+  //   std::cout << "perturbed index build took " << builder.get_build_duration().count() << " seconds\n";
+  // }
 
   {
-    auto vec = get_random_vector(params.dim);
-    IndexBuilder builder(params, index, params.num_elements);
-    builder.start([vec](int) {
-      return get_random_perturbed_vector(vec, 0.000001); });
+    const hnswlib::labeltype hub_label = 2 * static_cast<hnswlib::labeltype>(params.num_elements);
+    // Keep the hub within the existing cloud so graph search can reach it.
+    std::vector<float> center(params.dim, 0.5f);
+    std::vector<std::vector<float>> vectors(params.num_elements);
+    std::generate(vectors.begin(), vectors.end(), [&center, &params]() {
+      auto point = get_random_unit_vector(params.dim);
+      for (int i = 0; i < params.dim; ++i) {
+        point[i] += center[i];
+      }
+      return point;
+    });
+    std::atomic<int> i{0};
+    // Insert the hub before timing the shell workload.
+    index->addPoint(center.data(), hub_label);
+
+    IndexBuilder builder(params, index, hub_label + 1);
+    builder.start([&vectors, &i](int) {
+      return std::move(vectors[i++]); });
     builder.join();
-    std::cout << "perturbed index build took " << builder.get_build_duration().count() << " seconds\n";
+    std::cout << "single-hub shell build took "
+              << builder.get_build_duration().count() << " seconds\n";
+    // if (!params.brute_force) {
+    //   auto* hnsw_index = static_cast<hnswlib::HierarchicalNSW<float>*>(index);
+    //   size_t points_linked_to_hub = 0;
+    //   for (int i = 0; i < params.num_elements; ++i) {
+    //     hnswlib::tableint internal_id =
+    //         hnsw_index->getInternalIdByLabel(hub_label + 1 + i);
+    //     auto* links = hnsw_index->get_linklist0(internal_id);
+    //     size_t degree = hnsw_index->getListCount(links);
+    //     auto* neighbors = reinterpret_cast<hnswlib::tableint*>(links + 1);
+    //     for (size_t j = 0; j < degree; ++j) {
+    //       if (hnsw_index->getExternalLabel(neighbors[j]) == hub_label) {
+    //         ++points_linked_to_hub;
+    //         break;
+    //       }
+    //     }
+    //   }
+    //   std::cout << ",center_link_fraction="
+    //             << static_cast<double>(points_linked_to_hub) / params.num_elements;
+    // }
+    // std::cout << "\n";
   }
 
   if (params.search) {
