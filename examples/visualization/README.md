@@ -1,7 +1,8 @@
 # HNSW search walkthrough
 
-Open `index.html` in a browser. There is no install or build step. Keep `search.js`
-beside it; an internet connection is needed for the pinned D3 7.9.0 CDN script.
+Open `index.html` for search or `insertion.html` for insertion in a browser.
+There is no install or build step. Keep the files in this directory together;
+an internet connection is needed for the pinned D3 7.9.0 CDN script.
 
 1. Press **Step** or the **Right Arrow** key to inspect one decision, or **Play**
    to advance every 700 ms. Stepping pauses playback. When the ef slider has
@@ -36,7 +37,7 @@ exploration but does not guarantee an exact answer for every query.
 returns snapshots. `createDataset(seed)` reproduces a graph for debugging;
 `search(query, ef, dataset)` searches it. The initial seed is 42. New dataset
 chooses a fresh seed and places the query uniformly at random across the plot.
-`index.html` contains the styling, D3 rendering, and playback controls. Queues use
+`index.html` contains D3 rendering and playback controls; `style.css` holds shared styles. Queues use
 sorted arrays because this graph is tiny. Bottom-layer search retains at most ef
 best candidates; its pending queue and visited set may be larger than ef.
 
@@ -44,4 +45,43 @@ Run the dependency-free algorithm checks with:
 
 ```sh
 node examples/visualization/search.test.js
+node examples/visualization/insertion.test.js
 ```
+
+## Single-layer insertion
+
+The insertion page shows one layer throughout. It first searches for up to
+`efConstruction` candidates, then selects at most `M=3` outgoing neighbors for
+the new point. It considers reciprocal links and prunes existing outgoing lists
+that would exceed six neighbors. Arrowheads show the direction of traversal;
+removing one direction does not remove its reverse.
+
+- **Nearest neighbors** (default) takes the closest discovered candidates.
+- **Diversity heuristic** rejects candidate C when a selected R satisfies
+  `distance(C, R) < distance(C, Q)`, where Q is the center whose neighbors are
+  being selected. Dashed lines and the comparison panel show these distances.
+  As in hnswlib, fewer candidates than the limit are all retained. There is no
+  candidate extension or refilling of rejected candidates.
+
+The selected rule also applies when pruning a full neighbor list, with the
+existing node as Q and a limit of six. Distances shown are squared Euclidean
+distances; this preserves their ordering and the heuristic's comparisons.
+
+The starting graph always uses nearest-neighbor insertion with width 10 and
+point 0 as its entry point. Switching methods keeps that graph, the proposed
+point, and the candidate-search results fixed. Moving the point or changing a
+control pauses and restarts playback. **Reset** replays the same insertion;
+completed insertions do not accumulate. **New dataset** replaces the baseline
+and randomizes the proposed point while preserving method and width.
+
+`insertion.js` exports `buildGraph(points)` and
+`insertionTrace(graph, point, efConstruction, selectionMethod)`, where the method
+is `nearest` or `diversity`. The trace contains independent graph snapshots and
+does not mutate the baseline. Baseline construction uses the same insertion
+routine. Candidate search reuses the search demo's single-layer interface;
+the final exhaustive comparison is excluded from insertion playback and its
+search counter. Diversity comparisons are counted separately.
+
+This lesson omits level assignment, upper-layer navigation, deletions, and
+concurrent insertion. The separate search demo retains its original simplified
+graph builder. Both pages share `style.css` and load the same pinned D3 version.

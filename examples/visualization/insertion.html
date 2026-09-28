@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HNSW insertion, one layer at a time</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .controls label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: .85rem; }
+    select { font: inherit; color: inherit; padding: 8px; border: 1px solid #bdcac2; border-radius: 6px; background: white; }
+    .insertion-layout { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(270px, 1fr); gap: 24px; margin: 20px 0; align-items: start; }
+    .graph-panel { border: 1px solid #d6dfd7; border-radius: 10px; background: white; overflow: hidden; }
+    .graph-panel h2 { font-size: .9rem; padding: 14px 18px 0; }
+    .sidebar { min-width: 0; }
+    .sidebar h3 { font-size: .76rem; text-transform: uppercase; letter-spacing: .07em; color: #64746d; margin: 18px 0 10px; }
+    #phase { color: #21634e; margin-top: 0; }
+    #explanation { min-height: 100px; }
+    .phase-list { list-style: none; display: flex; gap: 6px; padding: 0; margin: 0 0 18px; flex-wrap: wrap; font-size: .75rem; }
+    .phase-list li { padding: 4px 7px; border-radius: 4px; background: #e8eee7; }
+    .phase-list .active { background: #21634e; color: white; }
+    .node { stroke-width: 1.6; }
+    .node.search-candidate, .dot.search-candidate { fill: #527cbf; background: #527cbf; stroke: #2b5087; border-color: #2b5087; }
+    .node.selected { fill: #3c8b70; stroke: #21634e; }
+    .node.rejected { fill: #f3c8c1; stroke: #ae5242; }
+    .node.proposed { fill: #fff; stroke: #a83d66; stroke-width: 2.5; stroke-dasharray: 3 2; }
+    .node.inserted { fill: #a83d66; stroke: #7c2647; stroke-dasharray: none; }
+    .focus-ring { fill: none; stroke: #c57a20; stroke-width: 2; pointer-events: none; }
+    .point-label { font-size: 12px; }
+    .edge { stroke: #aabbb0; stroke-width: 1.4; }
+    .comparison { fill: none; stroke-width: 2.2; stroke-dasharray: 5 4; pointer-events: none; }
+    .change-edge { fill: none; stroke-width: 2.5; pointer-events: none; }
+    .formula { padding: 12px; background: #fff; border: 1px solid #d6dfd7; border-radius: 6px; font-size: .88rem; margin-top: 14px; font-variant-numeric: tabular-nums; }
+    .chip { background: #eef0ed; }
+    .chip.search-candidate { background: #dce7f8; }
+    .chip.search-candidate small { color: #36557e; }
+    .chip.selected { background: #d1e5db; }
+    .chip.rejected { background: #f3ddd8; }
+    @media (max-width: 760px) {
+      .insertion-layout { grid-template-columns: 1fr; }
+      #explanation { min-height: 0; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">An illustrated algorithm · 02</p>
+    <nav aria-label="Walkthroughs"><a href="index.html">Search</a> · <a href="insertion.html" aria-current="page">Insertion</a></nav>
+    <h1>One point. One layer.</h1>
+    <p class="intro">Find candidates, choose neighbors, and make room for a new point. Start with nearest neighbors, then replay with the diversity heuristic to compare the connections.</p>
+  </header>
+  <div id="load-error" role="alert" hidden>The walkthrough could not load. Check your internet connection for D3 and keep search.js, insertion.js, and style.css beside this page.</div>
+  <noscript><p>This walkthrough needs JavaScript enabled.</p></noscript>
+  <div class="controls">
+    <button id="step" aria-keyshortcuts="ArrowRight" title="Step forward (Right Arrow)" disabled>Step →</button>
+    <button id="play" disabled>Play</button>
+    <button id="reset" disabled>Reset</button>
+    <button id="new-dataset" disabled>New dataset</button>
+    <label>Neighbor selection
+      <select id="method" disabled><option value="nearest">Nearest neighbors</option><option value="diversity">Diversity heuristic</option></select>
+    </label>
+    <label for="ef">efConstruction
+      <input id="ef" type="range" min="3" max="20" value="10" disabled aria-describedby="ef-hint">
+      <output id="ef-value" for="ef">10</output>
+    </label>
+  </div>
+  <p class="hint" id="ef-hint">Click to place point #30. Press → to step. M=3 new outgoing neighbors; existing lists allow up to 6. efConstruction controls the candidate-search width.</p>
+  <div class="legend" aria-label="Graph legend">
+    <span><i class="dot" style="background:#a83d66"></i> New point</span>
+    <span><i class="dot seen"></i> Visited</span>
+    <span><i class="dot search-candidate"></i> Search candidate</span>
+    <span><i class="dot kept"></i> Selected neighbor</span>
+    <span><i class="dot active"></i> Current center</span>
+    <span>→ One-way link · ↔ Reciprocal links</span>
+    <span>Dashed lines: distance comparisons</span>
+    <span style="color:#21634e">Green: added</span>
+    <span style="color:#ae5242">Red: removed</span>
+  </div>
+  <div class="insertion-layout">
+    <section class="graph-panel" aria-label="Single-layer graph">
+      <h2>Layer 0 · <span id="point-count">30 points + proposed point</span></h2>
+      <svg id="graph" viewBox="0 0 640 640" role="img" aria-label="Single graph layer. Click to place the proposed insertion point."></svg>
+    </section>
+    <section class="sidebar" aria-label="Insertion state">
+      <ol class="phase-list"><li data-phase="search">1 Search</li><li data-phase="select">2 Select</li><li data-phase="connect">3 Connect</li><li data-phase="prune">4 Prune if full</li></ol>
+      <h3 id="phase">Ready</h3>
+      <p id="explanation" aria-live="polite" aria-atomic="true">Loading the walkthrough…</p>
+      <div class="formula" id="comparison" hidden></div>
+      <p class="metrics" id="metrics"></p>
+      <h3 id="pending-title">Pending exploration</h3><div class="queue" id="pending"></div>
+      <h3 id="retained-title">Search candidates</h3><div class="queue" id="retained"></div>
+      <h3>Skipped in this selection</h3><div class="queue" id="rejected"></div>
+    </section>
+  </div>
+  <footer>
+    <p>The starting graph is built with nearest-neighbor selection. Switching methods keeps that graph and the new point fixed, so the candidate search is identical. “Nearest” means nearest among the candidates found by graph search.</p>
+    <p>Connections are directed: pruning one direction leaves the reverse direction unchanged. Completed insertions are replayable and do not accumulate. This lesson stays in one layer throughout.</p>
+  </footer>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="search.js"></script>
+<script src="insertion.js"></script>
+<script>
+  'use strict';
+  if (!window.d3 || !window.HnswDemo || !window.HnswInsertion) {
+    document.querySelector('#load-error').hidden = false;
+    document.querySelector('#explanation').textContent = 'The walkthrough is unavailable until its scripts load.';
+  } else {
+    const { createDataset, defaultDataset } = HnswDemo;
+    const { buildGraph, insertionTrace } = HnswInsertion;
+    let dataset = defaultDataset;
+    let baseline = buildGraph(dataset.points);
+    let point = { ...dataset.defaultQuery };
+    let trace, position = 0, timer = null;
+    const step = document.querySelector('#step');
+    const play = document.querySelector('#play');
+    const reset = document.querySelector('#reset');
+    const newDataset = document.querySelector('#new-dataset');
+    const ef = document.querySelector('#ef');
+    const method = document.querySelector('#method');
+    const svg = d3.select('#graph');
+    const scale = d3.scaleLinear().domain([0, 100]).range([30, 610]);
+    const defs = svg.append('defs');
+    for (const [name, color] of [['base', '#aabbb0'], ['active', '#c57a20'], ['added', '#21634e'], ['removed', '#ae5242']]) {
+      defs.append('marker').attr('id', `arrow-${name}`).attr('viewBox', '0 -4 8 8').attr('refX', 7).attr('refY', 0)
+        .attr('markerWidth', 6).attr('markerHeight', 6).attr('orient', 'auto-start-reverse').attr('markerUnits', 'userSpaceOnUse')
+        .append('path').attr('d', 'M0,-3L7,0L0,3Z').attr('fill', color);
+    }
+    svg.append('rect').attr('x', 30).attr('y', 30).attr('width', 580).attr('height', 580).attr('fill', '#fcfdfb').attr('stroke', '#edf1eb');
+    const edgeGroup = svg.append('g');
+    const changeGroup = svg.append('g');
+    const comparisonGroup = svg.append('g');
+    const nodeGroup = svg.append('g');
+    const labelGroup = svg.append('g');
+    const ring = svg.append('circle').attr('class', 'focus-ring').attr('r', 11);
+
+    function path(a, b, points) {
+      const x = scale(points[a].x), y = scale(points[a].y);
+      const dx = scale(points[b].x) - x, dy = scale(points[b].y) - y;
+      const length = Math.hypot(dx, dy);
+      if (length < 1) return `M${x},${y - 9}C${x + 32},${y - 38} ${x + 32},${y + 38} ${x},${y + 9}`;
+      const trim = Math.min(9, length / 3);
+      return `M${x + dx / length * trim},${y + dy / length * trim}L${x + dx - dx / length * trim},${y + dy - dy / length * trim}`;
+    }
+    function queue(selector, entries, className = '') {
+      const container = d3.select(selector);
+      container.selectAll('*').remove();
+      if (!entries.length) container.append('span').attr('class', 'hint').text('None');
+      for (const entry of entries) {
+        const chip = container.append('span').attr('class', `chip ${className}`);
+        chip.append('strong').text(`#${entry.id}`);
+        if (entry.distance !== undefined) chip.append('small').text(` · d² ${entry.distance.toFixed(1)}`);
+      }
+    }
+    function render() {
+      const state = trace[position];
+      const { points, adjacency } = state.graph;
+      const merged = new Map();
+      for (const [from, neighbors] of Object.entries(adjacency)) for (const to of neighbors) {
+        const a = Math.min(Number(from), to), b = Math.max(Number(from), to), key = `${a}-${b}`;
+        if (!merged.has(key)) merged.set(key, { key, a, b, forward: false, reverse: false });
+        merged.get(key)[Number(from) === a ? 'forward' : 'reverse'] = true;
+      }
+      edgeGroup.selectAll('path').data([...merged.values()], e => e.key).join('path').attr('class', 'edge').attr('fill', 'none')
+        .attr('d', e => path(e.a, e.b, points)).attr('marker-start', e => e.reverse ? 'url(#arrow-base)' : null)
+        .attr('marker-end', e => e.forward ? 'url(#arrow-base)' : null);
+      const changes = [
+        ...state.changed.map(edge => ({ edge, type: 'added', color: '#21634e' })),
+        ...state.removed.map(edge => ({ edge, type: 'removed', color: '#ae5242' }))
+      ];
+      if (state.activeEdge && !state.changed.length) changes.push({ edge: state.activeEdge, type: 'active', color: '#c57a20' });
+      changeGroup.selectAll('path').data(changes).join('path').attr('class', 'change-edge')
+        .attr('d', e => path(...e.edge, points)).attr('stroke', e => e.color).attr('marker-end', e => `url(#arrow-${e.type})`)
+        .attr('stroke-dasharray', e => e.type === 'removed' || state.kind === 'reciprocal' ? '5 3' : null);
+      const comparisons = [];
+      if (state.candidate !== null) comparisons.push({ edge: [state.center, state.candidate], color: '#a83d66' });
+      if (state.comparison) comparisons.push({ edge: [state.comparison.candidate, state.comparison.neighbor], color: '#c57a20' });
+      comparisonGroup.selectAll('path').data(comparisons).join('path').attr('class', 'comparison')
+        .attr('d', e => path(...e.edge, points)).attr('stroke', e => e.color);
+      nodeGroup.selectAll('circle').data(points, p => p.id).join('circle').attr('class', 'node')
+        .classed('visited', p => state.visited.includes(p.id))
+        .classed('search-candidate', p => state.phase === 'search' && state.retained.some(n => n.id === p.id))
+        .classed('selected', p => state.phase !== 'search' && (state.retained.some(n => n.id === p.id) || state.selected.includes(p.id)))
+        .classed('rejected', p => state.rejected.includes(p.id))
+        .classed('proposed', p => p.id === state.newId)
+        .classed('inserted', p => p.id === state.newId && state.kind === 'finish')
+        .attr('cx', p => scale(p.x)).attr('cy', p => scale(p.y)).attr('r', p => p.id === state.newId ? 7 : 5);
+      labelGroup.selectAll('text').data(points, p => p.id).join('text').attr('class', 'point-label')
+        .attr('x', p => scale(p.x) + (p.x > 85 ? -8 : 8)).attr('text-anchor', p => p.x > 85 ? 'end' : 'start')
+        .attr('y', p => scale(p.y) - 9).text(p => p.id === state.newId ? `${p.id} new` : p.id);
+      ring.attr('display', state.current === null ? 'none' : null);
+      if (state.current !== null) ring.attr('cx', scale(points[state.current].x)).attr('cy', scale(points[state.current].y));
+      const titles = { search: 'Find candidates', select: 'Select new neighbors', connect: 'Connect both directions', prune: `Prune outgoing neighbors of #${state.center}`, complete: 'Insertion complete' };
+      document.querySelector('#phase').textContent = titles[state.phase];
+      d3.selectAll('[data-phase]').classed('active', function () { return this.dataset.phase === state.phase; });
+      document.querySelector('#explanation').textContent = state.explanation;
+      document.querySelector('#metrics').textContent = `Step ${position + 1} / ${trace.length} · Search distance evaluations: ${state.evaluations} · Diversity comparisons: ${state.comparisons}`;
+      const formula = document.querySelector('#comparison');
+      formula.hidden = !state.comparison;
+      if (state.comparison) {
+        const c = state.comparison;
+        formula.textContent = `Q = #${c.center}, C = #${c.candidate}, R = #${c.neighbor}. Reject C when d²(C,R) < d²(C,Q): ${c.toNeighbor.toFixed(1)} ${c.toNeighbor < c.toCenter ? '<' : '≥'} ${c.toCenter.toFixed(1)}.`;
+      }
+      document.querySelector('#pending-title').textContent = state.phase === 'search' ? 'Pending exploration' : `Remaining candidates · distances to #${state.center}`;
+      document.querySelector('#retained-title').textContent = state.phase === 'search' ? 'Search candidates' : `Selected neighbors of #${state.center}`;
+      queue('#pending', state.pending);
+      queue('#retained', state.retained, state.phase === 'search' ? 'search-candidate' : 'selected');
+      queue('#rejected', state.rejected.map(id => ({ id })), 'rejected');
+      document.querySelector('#point-count').textContent = state.kind === 'finish' ? '31 points' : '30 points + proposed point';
+      step.disabled = play.disabled = state.kind === 'finish';
+      play.textContent = timer === null ? 'Play' : 'Pause';
+    }
+    function pause() { if (timer !== null) clearInterval(timer); timer = null; }
+    function advance() { if (position < trace.length - 1) position++; if (position === trace.length - 1) pause(); render(); }
+    function restart() {
+      pause(); position = 0;
+      trace = insertionTrace(baseline, point, Number(ef.value), method.value);
+      document.querySelector('#ef-value').textContent = ef.value;
+      render();
+    }
+    svg.on('click', function (event) {
+      const [x, y] = d3.pointer(event, this);
+      point = { x: Math.max(0, Math.min(100, scale.invert(x))), y: Math.max(0, Math.min(100, scale.invert(y))) };
+      restart();
+    });
+    step.addEventListener('click', () => { pause(); advance(); });
+    document.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowRight' || event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.target.matches('input, textarea, select') || event.target.isContentEditable || step.disabled) return;
+      event.preventDefault(); step.click();
+    });
+    play.addEventListener('click', () => { if (timer !== null) pause(); else timer = setInterval(advance, 700); render(); });
+    reset.addEventListener('click', restart);
+    ef.addEventListener('input', restart);
+    method.addEventListener('change', restart);
+    newDataset.addEventListener('click', () => {
+      pause();
+      dataset = createDataset((dataset.seed + 1 + Math.floor(Math.random() * 4294967295)) >>> 0);
+      baseline = buildGraph(dataset.points);
+      point = { ...dataset.defaultQuery };
+      restart();
+    });
+    reset.disabled = newDataset.disabled = ef.disabled = method.disabled = false;
+    restart();
+  }
+</script>
+</body>
+</html>

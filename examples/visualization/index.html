@@ -4,73 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>HNSW, one step at a time</title>
-  <style>
-    :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #253630; background: #f7f8f4; }
-    * { box-sizing: border-box; }
-    body { margin: 0; }
-    main { max-width: 1240px; margin: auto; padding: 40px 24px; }
-    h1 { font-size: clamp(1.8rem, 4vw, 2.6rem); letter-spacing: -.045em; line-height: 1.15; margin: 8px 0 16px; }
-    h2, h3, p { margin: 0; }
-    .eyebrow { color: #577168; font-size: .75rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
-    .intro { max-width: 770px; color: #53665e; }
-    .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 26px 0 12px; }
-    button { font: inherit; font-size: .9rem; font-weight: 600; padding: 9px 17px; border: 1px solid #bdcac2; background: white; color: inherit; border-radius: 6px; cursor: pointer; }
-    #step { background: #21634e; color: white; border-color: #21634e; }
-    button:disabled { opacity: .45; cursor: default; }
-    button:hover:not(:disabled) { filter: brightness(.94); }
-    :focus-visible { outline: 3px solid #486fc4; outline-offset: 3px; }
-    .ef-control { display: flex; align-items: center; gap: 10px; margin-left: 16px; }
-    input { accent-color: #21634e; }
-    output { min-width: 2ch; font-variant-numeric: tabular-nums; }
-    .hint { color: #64746d; font-size: .82rem; }
-    .legend { display: flex; flex-wrap: wrap; gap: 9px 20px; margin: 21px 0 14px; font-size: .8rem; }
-    .legend span { display: inline-flex; align-items: center; gap: 6px; }
-    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #d3dcd5; border: 1px solid #6f8176; }
-    .dot.seen { background: #b9d0e9; border-color: #4a6d95; }
-    .dot.kept { background: #3c8b70; border-color: #21634e; }
-    .dot.active { background: #e6a34b; border: 2px solid #865017; }
-    .query-key { color: #a83d66; font-weight: 800; font-size: 18px; line-height: 10px; }
-    .layers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-    .layer { background: #fff; border: 1px solid #d6dfd7; border-radius: 10px; overflow: hidden; }
-    .layer.active { border-color: #21634e; box-shadow: 0 0 0 1px #21634e; }
-    .layer-header { display: flex; justify-content: space-between; align-items: center; padding: 15px 16px 0; gap: 8px; }
-    .layer h2 { font-size: .95rem; }
-    .layer-tag { font-size: .7rem; color: #64746d; }
-    .layer.active .layer-tag { color: #21634e; font-weight: 700; }
-    svg { display: block; width: 100%; aspect-ratio: 1; cursor: crosshair; touch-action: manipulation; }
-    .edge { stroke: #cfd8d1; stroke-width: 1.3; }
-    .edge.inspected { stroke: #c57a20; stroke-width: 3; }
-    .node { fill: #e2e8e1; stroke: #7d8e80; stroke-width: 1.3; }
-    .node.visited { fill: #b9d0e9; stroke: #4a6d95; }
-    .node.retained { fill: #3c8b70; stroke: #21634e; }
-    .node.current { fill: #e6a34b; stroke: #865017; stroke-width: 2.5; }
-    .node.result { fill: #3c8b70; stroke: #21634e; stroke-width: 3; }
-    .point-label { font: 10px system-ui, sans-serif; fill: #526459; pointer-events: none; }
-    .query { stroke: #a83d66; stroke-width: 2.5; fill: none; pointer-events: none; }
-    .exact { fill: none; stroke: #a83d66; stroke-width: 2; stroke-dasharray: 3 2; pointer-events: none; }
-    .details { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 22px; padding: 23px 0; }
-    .details h3 { font-size: .76rem; text-transform: uppercase; letter-spacing: .07em; color: #64746d; margin-bottom: 10px; }
-    #explanation { min-height: 76px; }
-    .metrics { color: #64746d; font-size: .8rem; margin-top: 12px; font-variant-numeric: tabular-nums; }
-    .queue { display: flex; gap: 5px; flex-wrap: wrap; align-content: start; }
-    .chip { font-size: .78rem; background: #e8eee7; border-radius: 4px; padding: 4px 7px; font-variant-numeric: tabular-nums; }
-    .chip small { color: #5b7165; }
-    footer { border-top: 1px solid #d6dfd7; padding-top: 18px; color: #64746d; font-size: .83rem; }
-    #load-error { padding: 16px; background: #ffe7e4; border: 1px solid #d98c82; margin: 20px 0; }
-    [hidden] { display: none !important; }
-    @media (max-width: 760px) {
-      main { padding: 24px 16px; }
-      .layers, .details { grid-template-columns: 1fr; }
-      .layer svg { max-height: 380px; }
-      .ef-control { margin-left: 0; }
-      #explanation { min-height: 0; }
-    }
-  </style>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
   <header>
     <p class="eyebrow">An illustrated algorithm · 01</p>
+    <nav aria-label="Walkthroughs"><a href="index.html" aria-current="page">Search</a> · <a href="insertion.html">Insertion</a></nav>
     <h1>HNSW, one step at a time.</h1>
     <p class="intro">Find a nearby point without checking every point. Start with a few long-range connections, descend through the layers, then explore the most promising neighbors.</p>
   </header>
