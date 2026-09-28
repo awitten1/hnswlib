@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HNSW, one step at a time</title>
+  <style>
+    :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #253630; background: #f7f8f4; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 1240px; margin: auto; padding: 40px 24px; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.6rem); letter-spacing: -.045em; line-height: 1.15; margin: 8px 0 16px; }
+    h2, h3, p { margin: 0; }
+    .eyebrow { color: #577168; font-size: .75rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+    .intro { max-width: 770px; color: #53665e; }
+    .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 26px 0 12px; }
+    button { font: inherit; font-size: .9rem; font-weight: 600; padding: 9px 17px; border: 1px solid #bdcac2; background: white; color: inherit; border-radius: 6px; cursor: pointer; }
+    #step { background: #21634e; color: white; border-color: #21634e; }
+    button:disabled { opacity: .45; cursor: default; }
+    button:hover:not(:disabled) { filter: brightness(.94); }
+    :focus-visible { outline: 3px solid #486fc4; outline-offset: 3px; }
+    .ef-control { display: flex; align-items: center; gap: 10px; margin-left: 16px; }
+    input { accent-color: #21634e; }
+    output { min-width: 2ch; font-variant-numeric: tabular-nums; }
+    .hint { color: #64746d; font-size: .82rem; }
+    .legend { display: flex; flex-wrap: wrap; gap: 9px 20px; margin: 21px 0 14px; font-size: .8rem; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #d3dcd5; border: 1px solid #6f8176; }
+    .dot.seen { background: #b9d0e9; border-color: #4a6d95; }
+    .dot.kept { background: #3c8b70; border-color: #21634e; }
+    .dot.active { background: #e6a34b; border: 2px solid #865017; }
+    .query-key { color: #a83d66; font-weight: 800; font-size: 18px; line-height: 10px; }
+    .layers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .layer { background: #fff; border: 1px solid #d6dfd7; border-radius: 10px; overflow: hidden; }
+    .layer.active { border-color: #21634e; box-shadow: 0 0 0 1px #21634e; }
+    .layer-header { display: flex; justify-content: space-between; align-items: center; padding: 15px 16px 0; gap: 8px; }
+    .layer h2 { font-size: .95rem; }
+    .layer-tag { font-size: .7rem; color: #64746d; }
+    .layer.active .layer-tag { color: #21634e; font-weight: 700; }
+    svg { display: block; width: 100%; aspect-ratio: 1; cursor: crosshair; touch-action: manipulation; }
+    .edge { stroke: #cfd8d1; stroke-width: 1.3; }
+    .edge.inspected { stroke: #c57a20; stroke-width: 3; }
+    .node { fill: #e2e8e1; stroke: #7d8e80; stroke-width: 1.3; }
+    .node.visited { fill: #b9d0e9; stroke: #4a6d95; }
+    .node.retained { fill: #3c8b70; stroke: #21634e; }
+    .node.current { fill: #e6a34b; stroke: #865017; stroke-width: 2.5; }
+    .node.result { fill: #3c8b70; stroke: #21634e; stroke-width: 3; }
+    .point-label { font: 10px system-ui, sans-serif; fill: #526459; pointer-events: none; }
+    .query { stroke: #a83d66; stroke-width: 2.5; fill: none; pointer-events: none; }
+    .exact { fill: none; stroke: #a83d66; stroke-width: 2; stroke-dasharray: 3 2; pointer-events: none; }
+    .details { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 22px; padding: 23px 0; }
+    .details h3 { font-size: .76rem; text-transform: uppercase; letter-spacing: .07em; color: #64746d; margin-bottom: 10px; }
+    #explanation { min-height: 76px; }
+    .metrics { color: #64746d; font-size: .8rem; margin-top: 12px; font-variant-numeric: tabular-nums; }
+    .queue { display: flex; gap: 5px; flex-wrap: wrap; align-content: start; }
+    .chip { font-size: .78rem; background: #e8eee7; border-radius: 4px; padding: 4px 7px; font-variant-numeric: tabular-nums; }
+    .chip small { color: #5b7165; }
+    footer { border-top: 1px solid #d6dfd7; padding-top: 18px; color: #64746d; font-size: .83rem; }
+    #load-error { padding: 16px; background: #ffe7e4; border: 1px solid #d98c82; margin: 20px 0; }
+    [hidden] { display: none !important; }
+    @media (max-width: 760px) {
+      main { padding: 24px 16px; }
+      .layers, .details { grid-template-columns: 1fr; }
+      .layer svg { max-height: 380px; }
+      .ef-control { margin-left: 0; }
+      #explanation { min-height: 0; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">An illustrated algorithm · 01</p>
+    <h1>HNSW, one step at a time.</h1>
+    <p class="intro">Find a nearby point without checking every point. Start with a few long-range connections, descend through the layers, then explore the most promising neighbors.</p>
+  </header>
+  <div id="load-error" role="alert" hidden>The demo could not load. Check your internet connection to load D3, and keep search.js beside this page.</div>
+  <noscript><p>This walkthrough needs JavaScript enabled.</p></noscript>
+  <div class="controls">
+    <button id="step" aria-keyshortcuts="ArrowRight" title="Step forward (Right Arrow)" disabled>Step →</button>
+    <button id="play" disabled>Play</button>
+    <button id="reset" disabled>Reset</button>
+    <button id="new-dataset" disabled>New dataset</button>
+    <label class="ef-control" for="ef">Search width <strong>ef</strong>
+      <input id="ef" type="range" min="1" max="20" value="4" disabled aria-describedby="ef-hint">
+      <output id="ef-value" for="ef">4</output>
+    </label>
+  </div>
+  <p class="hint" id="ef-hint">Press → to step forward, or click a plot to place the query. Higher ef keeps more candidates at layer 0. New dataset generates fresh clusters and connections.</p>
+  <div class="legend" aria-label="Graph legend">
+    <span><b class="query-key">×</b> Query</span>
+    <span><i class="dot"></i> Unvisited</span>
+    <span><i class="dot seen"></i> Visited in this layer</span>
+    <span><i class="dot kept"></i> Retained best</span>
+    <span><i class="dot active"></i> Current point</span>
+    <span>Orange line: inspected connection</span>
+  </div>
+  <div class="layers" id="layers"></div>
+  <section class="details" aria-label="Search state">
+    <div>
+      <h3 id="phase">Ready</h3>
+      <p id="explanation" aria-live="polite" aria-atomic="true">Loading the walkthrough…</p>
+      <p class="metrics" id="metrics"></p>
+    </div>
+    <div><h3>Pending exploration</h3><div class="queue" id="pending"></div></div>
+    <div><h3>Retained best candidates</h3><div class="queue" id="best"></div></div>
+  </section>
+  <footer>
+    <p>A generated teaching graph: 30 clustered points, 3 layers, and k=1. Upper layers contain random subsets of the same points. Connections favor nearby neighbors in different directions. Graph construction is simplified to focus on search; this is not an index exported from hnswlib.</p>
+    <p>Candidate labels show point ID and squared Euclidean distance (d²). Distances are cached per query. At completion, a dashed pink ring marks the exact nearest point; its exhaustive check is excluded from the counter.</p>
+  </footer>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="search.js"></script>
+<script>
+  'use strict';
+  if (!window.d3 || !window.HnswDemo) {
+    document.querySelector('#load-error').hidden = false;
+    document.querySelector('#explanation').textContent = 'The walkthrough is unavailable until its scripts load.';
+  } else {
+    const { createDataset, defaultDataset, search } = HnswDemo;
+    let dataset = defaultDataset;
+    let { points, layers } = dataset;
+    let query = { ...dataset.defaultQuery };
+    let trace;
+    let position = 0;
+    let timer = null;
+    const scale = d3.scaleLinear().domain([0, 100]).range([25, 335]);
+    const panels = [];
+    const step = document.querySelector('#step');
+    const play = document.querySelector('#play');
+    const reset = document.querySelector('#reset');
+    const newDataset = document.querySelector('#new-dataset');
+    const ef = document.querySelector('#ef');
+    const edgeKey = edge => [...edge].sort((a, b) => a - b).join('-');
+
+    function buildPanels() {
+      d3.select('#layers').selectAll('*').remove();
+      panels.length = 0;
+      for (const level of [2, 1, 0]) {
+        const data = layers[level];
+        const panel = d3.select('#layers').append('section').attr('class', 'layer');
+        const header = panel.append('div').attr('class', 'layer-header');
+        header.append('h2').text(`Layer ${level}`);
+        const tag = header.append('span').attr('class', 'layer-tag');
+        const svg = panel.append('svg').attr('viewBox', '0 0 360 360')
+          .attr('role', 'img').attr('aria-label', `Layer ${level}: ${data.nodes.length} points. Click to place a query.`);
+        svg.append('title').text(`Layer ${level}: points share their positions across layers.`);
+        // A shared square viewBox preserves distances at every screen size.
+        svg.append('rect').attr('x', 25).attr('y', 25).attr('width', 310).attr('height', 310)
+          .attr('fill', '#fcfdfb').attr('stroke', '#edf1eb');
+        const edges = svg.append('g').selectAll('line').data(data.edges).join('line').attr('class', 'edge')
+          .attr('x1', e => scale(points[e[0]].x)).attr('y1', e => scale(points[e[0]].y))
+          .attr('x2', e => scale(points[e[1]].x)).attr('y2', e => scale(points[e[1]].y));
+        const nodes = svg.append('g').selectAll('circle').data(data.nodes.map(id => points[id])).join('circle')
+          .attr('class', 'node').attr('cx', p => scale(p.x)).attr('cy', p => scale(p.y)).attr('r', 5);
+        nodes.append('title').text(p => `Point ${p.id}: (${p.x}, ${p.y})`);
+        svg.append('g').selectAll('text').data(data.nodes.map(id => points[id])).join('text')
+          .attr('class', 'point-label').attr('x', p => scale(p.x) + 8).attr('y', p => scale(p.y) - 7).text(p => p.id);
+        const exact = svg.append('circle').attr('class', 'exact').attr('r', 11).attr('display', 'none');
+        const marker = svg.append('path').attr('class', 'query').attr('d', 'M-6,-6L6,6M-6,6L6,-6');
+        svg.on('click', function (event) {
+          const [x, y] = d3.pointer(event, this);
+          query = { x: Math.max(0, Math.min(100, scale.invert(x))), y: Math.max(0, Math.min(100, scale.invert(y))) };
+          restart();
+        });
+        panels.push({ level, panel, tag, edges, nodes, exact, marker });
+      }
+    }
+
+    function renderQueue(selector, entries, empty) {
+      const container = d3.select(selector);
+      container.selectAll('*').remove();
+      if (!entries.length) container.append('span').attr('class', 'hint').text(empty);
+      for (const entry of entries) {
+        const chip = container.append('span').attr('class', 'chip');
+        chip.append('strong').text(`#${entry.id} `);
+        chip.append('small').text(`d² ${entry.distance.toFixed(1)}`);
+      }
+    }
+
+    function render() {
+      const state = trace[position];
+      const finished = state.kind === 'finish';
+      for (const p of panels) {
+        const active = p.level === state.layer;
+        p.panel.classed('active', active);
+        p.tag.text(`${layers[p.level].nodes.length} points${active ? finished ? ' · complete' : ' · searching' : ''}`);
+        p.marker.attr('transform', `translate(${scale(query.x)},${scale(query.y)})`);
+        p.edges.classed('inspected', e => active && state.edge && edgeKey(e) === edgeKey(state.edge));
+        p.nodes.classed('visited', n => state.visited[p.level].includes(n.id))
+          .classed('retained', n => active && state.best.some(b => b.id === n.id))
+          .classed('current', n => active && !finished && state.current === n.id)
+          .classed('result', n => active && finished && state.result === n.id);
+        p.exact.attr('display', finished && p.level === 0 ? null : 'none');
+        if (finished) p.exact.attr('cx', scale(points[state.exact].x)).attr('cy', scale(points[state.exact].y));
+      }
+      document.querySelector('#phase').textContent = finished ? 'Search complete' : `Layer ${state.layer} · ${state.layer ? 'Greedy navigation' : 'Candidate exploration'}`;
+      document.querySelector('#explanation').textContent = state.explanation;
+      document.querySelector('#metrics').textContent = `Step ${position + 1} / ${trace.length} · Distance evaluations: ${state.evaluations} / ${points.length}`;
+      renderQueue('#pending', state.pending, state.layer ? 'Upper layers follow one closest point.' : 'No pending candidates.');
+      renderQueue('#best', state.best, 'No candidates yet.');
+      step.disabled = finished;
+      play.disabled = finished;
+      play.textContent = timer === null ? 'Play' : 'Pause';
+    }
+
+    function pause() {
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+    }
+    function advance() {
+      if (position < trace.length - 1) position++;
+      if (position === trace.length - 1) pause();
+      render();
+    }
+    function restart() {
+      pause();
+      position = 0;
+      trace = search(query, Number(ef.value), dataset);
+      document.querySelector('#ef-value').textContent = ef.value;
+      render();
+    }
+    step.addEventListener('click', () => { pause(); advance(); });
+    document.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowRight' || event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.target.matches('input, textarea, select') || event.target.isContentEditable) return;
+      if (step.disabled) return;
+      event.preventDefault();
+      step.click();
+    });
+    play.addEventListener('click', () => {
+      if (timer !== null) pause();
+      else timer = setInterval(advance, 700);
+      render();
+    });
+    reset.addEventListener('click', restart);
+    newDataset.addEventListener('click', () => {
+      pause();
+      dataset = createDataset((dataset.seed + 1 + Math.floor(Math.random() * 4294967295)) >>> 0);
+      ({ points, layers } = dataset);
+      query = { ...dataset.defaultQuery };
+      buildPanels();
+      restart();
+    });
+    ef.addEventListener('input', restart);
+    reset.disabled = ef.disabled = newDataset.disabled = false;
+    buildPanels();
+    restart();
+  }
+</script>
+</body>
+</html>
